@@ -141,6 +141,19 @@ config TOUCHSCREEN_ATMEL_MAXTOUCH_TS
 	  To compile this driver as a module, choose M here: the
 	  module will be called atmel_maxtouch_ts.
 
+config TOUCHSCREEN_ATMEL_MXT_LETV
+	tristate "Atmel mXT I2C Touchscreen (LeEco)"
+	depends on I2C
+	select FW_LOADER
+	help
+	  LeEco maXTouch driver for compatible "atmel,atmel_mxt_ts".
+	  Used on G0215D so userspace can write update_fw, update_cfg
+	  and plugin. The plugin node accepts the write and does not
+	  run the factory plugin engine.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called atmel_mxt_ts_letv.
+
 config TOUCHSCREEN_AUO_PIXCIR
 	tristate "AUO in-cell touchscreen using Pixcir ICs"
 	depends on I2C

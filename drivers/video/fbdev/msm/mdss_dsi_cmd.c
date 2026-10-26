@@ -696,7 +696,7 @@ void mdss_dsi_set_tear_on(struct mdss_dsi_ctrl_pdata *ctrl)
 
 	cmdreq.cmds = &dsi_tear_on_cmd;
 	cmdreq.cmds_cnt = 1;
-	cmdreq.flags = CMD_REQ_COMMIT;
+	cmdreq.flags = CMD_REQ_COMMIT | CMD_REQ_LP_MODE;
 	cmdreq.rlen = 0;
 	cmdreq.cb = NULL;
 
@@ -714,7 +714,7 @@ void mdss_dsi_set_tear_off(struct mdss_dsi_ctrl_pdata *ctrl)
 
 	cmdreq.cmds = &dsi_tear_off_cmd;
 	cmdreq.cmds_cnt = 1;
-	cmdreq.flags = CMD_REQ_COMMIT;
+	cmdreq.flags = CMD_REQ_COMMIT | CMD_REQ_LP_MODE;
 	cmdreq.rlen = 0;
 	cmdreq.cb = NULL;
 

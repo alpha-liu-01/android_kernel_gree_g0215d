@@ -1232,6 +1232,42 @@ static struct mdss_mdp_pipe *mdss_mdp_pipe_init(struct mdss_mdp_mixer *mixer,
 		pipe = NULL;
 	}
 
+	/*
+	 * Bootloader splash handoff marks those pipes busy (refcount 1).
+	 * A split panel stages both DMA pipes, so the first commit cannot
+	 * allocate a new one and the screen stays at the last black frame.
+	 * Drop that hold and try once more.
+	 */
+	if (!pipe && pipe_pool) {
+		bool released = false;
+
+		for (i = 0; i < npipes; i++) {
+			struct mdss_mdp_pipe *hp = pipe_pool + i;
+
+			if (!hp->is_handed_off)
+				continue;
+			hp->is_handed_off = false;
+			list_del_init(&hp->list);
+			atomic_set(&hp->kref.refcount, 0);
+			hp->mixer_left = NULL;
+			hp->mixer_right = NULL;
+			hp->mfd = NULL;
+			released = true;
+		}
+		if (released) {
+			pr_warn("released handed-off type %d pipes\n", type);
+			for (i = off; i < npipes; i++) {
+				pipe = pipe_pool + i;
+				if (pipe &&
+				    atomic_read(&pipe->kref.refcount) == 0) {
+					pipe->mixer_left = mixer;
+					break;
+				}
+				pipe = NULL;
+			}
+		}
+	}
+
 	if (pipe && type == MDSS_MDP_PIPE_TYPE_CURSOR) {
 		mdss_mdp_init_pipe_params(pipe);
 		pr_debug("cursor: type=%x pnum=%d\n",

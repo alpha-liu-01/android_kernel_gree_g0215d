@@ -508,10 +508,25 @@ static int mdss_mdp_cmd_tearcheck_setup(struct mdss_mdp_cmd_ctx *ctx,
 		 */
 		if (mdss_mdp_pingpong_read(mixer->pingpong_base,
 			MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG) & BIT(31)) {
+			bool right_rd_ptr_disabled = false;
 
 			/* 1. disable rd pointer from the external te  */
 			rd_ptr_disabled =
 				__disable_rd_ptr_from_te(mixer->pingpong_base);
+
+			/*
+			 * Dual-gate split: the right pingpong has its own TE.
+			 * Leaving it running while the left waits lets one
+			 * side finish a frame the other has not started.
+			 */
+			if (is_split_lm(ctl->mfd)) {
+				mixer_right = mdss_mdp_mixer_get(ctl,
+					MDSS_MDP_MIXER_MUX_RIGHT);
+				if (mixer_right)
+					right_rd_ptr_disabled =
+						__disable_rd_ptr_from_te(
+						mixer_right->pingpong_base);
+			}
 
 			/* 2. wait for previous transfer to finish */
 			mdss_mdp_cmd_wait4_autorefresh_pp(ctl);
@@ -536,6 +551,9 @@ static int mdss_mdp_cmd_tearcheck_setup(struct mdss_mdp_cmd_ctx *ctx,
 			/* 4. re-enable rd pointer from te (if was enabled) */
 			if (rd_ptr_disabled)
 				__enable_rd_ptr_from_te(mixer->pingpong_base);
+			if (right_rd_ptr_disabled && mixer_right)
+				__enable_rd_ptr_from_te(
+					mixer_right->pingpong_base);
 
 		}
 		rc = mdss_mdp_cmd_tearcheck_cfg(mixer, ctx, locked);
@@ -2606,11 +2624,26 @@ static void mdss_mdp_cmd_pre_programming(struct mdss_mdp_ctl *mctl)
 
 		/*
 		 * instruct MDP to ignore the panel TE so the next auto-refresh
-		 * is delayed until flush bits are set.
+		 * is delayed until flush bits are set. Both pingpongs, or the
+		 * side left running walks a frame ahead and the dual-gate
+		 * picture breaks into horizontal bands.
 		 */
 		__disable_rd_ptr_from_te(pp_base);
 
 		ctx->ignore_external_te = true;
+
+		if (mctl->mfd->split_mode == MDP_DUAL_LM_DUAL_DISPLAY) {
+			struct mdss_mdp_ctl *sctl = mdss_mdp_get_split_ctl(mctl);
+			struct mdss_mdp_cmd_ctx *sctx;
+
+			if (sctl && sctl->mixer_left) {
+				__disable_rd_ptr_from_te(
+					sctl->mixer_left->pingpong_base);
+				sctx = sctl->intf_ctx[MASTER_CTX];
+				if (sctx)
+					sctx->ignore_external_te = true;
+			}
+		}
 
 	}
 	mutex_unlock(&ctx->autorefresh_lock);
@@ -2642,6 +2675,18 @@ static void mdss_mdp_cmd_post_programming(struct mdss_mdp_ctl *mctl)
 		__enable_rd_ptr_from_te(pp_base);
 
 		ctx->ignore_external_te = false;
+	}
+
+	if (mctl->mfd->split_mode == MDP_DUAL_LM_DUAL_DISPLAY) {
+		struct mdss_mdp_ctl *sctl = mdss_mdp_get_split_ctl(mctl);
+		struct mdss_mdp_cmd_ctx *sctx = NULL;
+
+		if (sctl)
+			sctx = sctl->intf_ctx[MASTER_CTX];
+		if (sctx && sctx->ignore_external_te && sctl->mixer_left) {
+			__enable_rd_ptr_from_te(sctl->mixer_left->pingpong_base);
+			sctx->ignore_external_te = false;
+		}
 	}
 }
 
@@ -2872,6 +2917,8 @@ static int mdss_mdp_disable_autorefresh(struct mdss_mdp_ctl *ctl,
 
 	if (is_pingpong_split(ctl->mfd))
 		__disable_autorefresh(mdata->slave_pingpong_base);
+	else if (sctl && sctl->mixer_left)
+		__disable_autorefresh(sctl->mixer_left->pingpong_base);
 
 	ctx->autorefresh_state = MDP_AUTOREFRESH_OFF;
 	ctx->autorefresh_frame_cnt = 0;
@@ -2939,6 +2986,10 @@ static void __mdss_mdp_kickoff(struct mdss_mdp_ctl *ctl,
 
 		if (is_pp_split)
 			mdss_mdp_pingpong_write(mdata->slave_pingpong_base,
+				MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG,
+				BIT(31) | ctx->autorefresh_frame_cnt);
+		else if (sctl && sctl->mixer_left)
+			mdss_mdp_pingpong_write(sctl->mixer_left->pingpong_base,
 				MDSS_MDP_REG_PP_AUTOREFRESH_CONFIG,
 				BIT(31) | ctx->autorefresh_frame_cnt);
 
@@ -3067,6 +3118,16 @@ static int mdss_mdp_cmd_kickoff(struct mdss_mdp_ctl *ctl, void *arg)
 	 */
 	if (__mdss_mdp_cmd_is_panel_power_off(ctx))
 		mdss_mdp_cmd_panel_on(ctl, sctl);
+
+	/*
+	 * Blank clears this. Ask for it again before the kickoff below
+	 * programs the pingpong, so a later unblank does not stay off.
+	 */
+	if (ctl->is_master &&
+	    ctl->panel_data->panel_info.cmd_autorefresh &&
+	    ctx->autorefresh_state == MDP_AUTOREFRESH_OFF)
+		mdss_mdp_cmd_set_autorefresh_mode(ctl,
+			ctl->panel_data->panel_info.cmd_autorefresh);
 
 	ctx->current_pp_num = ctx->default_pp_num;
 	if (sctx)

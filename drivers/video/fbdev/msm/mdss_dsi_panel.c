@@ -2271,6 +2271,11 @@ static int mdss_dsi_parse_panel_features(struct device_node *np,
 	mdss_dsi_parse_dcs_cmds(np, &ctrl->lp_off_cmds,
 			"qcom,mdss-dsi-lp-mode-off", NULL);
 
+	if (!of_property_read_u32(np, "qcom,mdss-dsi-cmd-autorefresh",
+			&pinfo->cmd_autorefresh) &&
+			pinfo->cmd_autorefresh >= 6)
+		pinfo->cmd_autorefresh = 0;
+
 	return 0;
 }
 
@@ -2968,6 +2973,8 @@ static int mdss_panel_parse_dt(struct device_node *np,
 
 	pinfo->mipi.lp11_init = of_property_read_bool(np,
 					"qcom,mdss-dsi-lp11-init");
+	pinfo->cont_splash_disabled = of_property_read_bool(np,
+					"qcom,mdss-dsi-disable-cont-splash");
 	rc = of_property_read_u32(np, "qcom,mdss-dsi-init-delay-us", &tmp);
 	pinfo->mipi.init_delay = (!rc ? tmp : 0);
 

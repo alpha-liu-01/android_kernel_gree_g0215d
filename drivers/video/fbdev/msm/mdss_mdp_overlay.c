@@ -796,16 +796,21 @@ int mdss_mdp_overlay_pipe_setup(struct msm_fb_data_type *mfd,
 		case PIPE_TYPE_AUTO:
 		default:
 			if (req->flags & MDP_OV_PIPE_FORCE_DMA) {
+				u32 rects =
+					mdata->rects_per_sspp[MDSS_MDP_PIPE_TYPE_DMA];
+
 				pipe_type = MDSS_MDP_PIPE_TYPE_DMA;
 				/*
-				 * For paths using legacy API's for pipe
-				 * allocation, use offset of 2 for allocating
-				 * right pipe for pipe type DMA. This is
-				 * because from SDM 3.x.x. onwards one DMA
-				 * pipe has two instances for multirect.
+				 * Right mixer uses the next physical DMA pipe.
+				 * 8996 has one rect per pipe, so the offset is 1.
+				 * A hardcoded 2 walks off the end of that pool and
+				 * the split panel never gets a right base pipe.
+				 * Multirect parts set rects_per_sspp to 2.
 				 */
+				if (!rects)
+					rects = 1;
 				off = (mixer_mux == MDSS_MDP_MIXER_MUX_RIGHT)
-						? 2 : 0;
+						? rects : 0;
 			} else if (fmt->is_yuv ||
 				(req->flags & MDP_OV_PIPE_SHARE) ||
 				is_vig_needed) {
@@ -1473,9 +1478,22 @@ int mdss_mdp_overlay_start(struct msm_fb_data_type *mfd)
 			return 0;
 		}
 	} else if (mdata->handoff_pending) {
-		pr_warn("fb%d: commit while splash handoff pending\n",
-				mfd->index);
-		return -EPERM;
+		/*
+		 * The bootloader left DISP_INTF_SEL on, so probe is holding
+		 * a splash footswitch vote. This panel does not take that
+		 * splash. Drop the vote and continue into a full init.
+		 * Returning here rejects every commit and the panel stays
+		 * suspended.
+		 */
+		if (!mfd->panel_info->cont_splash_enabled) {
+			pr_info("fb%d: release splash handoff for full panel init\n",
+					mfd->index);
+			mdss_mdp_footswitch_ctrl_splash(false);
+		} else {
+			pr_warn("fb%d: commit while splash handoff pending\n",
+					mfd->index);
+			return -EPERM;
+		}
 	}
 
 	pr_debug("starting fb%d overlay\n", mfd->index);

@@ -1,0 +1,163 @@
+/* G0215D board. IDs match the bootloader on the running device:
+ * msm-id 246 0x30001, board-id 8 0, pmic-id 0x20009 0x10013 0 0.
+ * The bootloader appends the NT35597 config0 split_dsi panel selector.
+ */
+
+/dts-v1/;
+
+#include "msm8996-v3.dtsi"
+#include "msm-pmi8996.dtsi"
+#include "msm8996-mtp.dtsi"
+
+/ {
+	model = "Gree G0215D MSM8996 v3 + PMI8996";
+	compatible = "qcom,msm8996-mtp", "qcom,msm8996", "qcom,mtp";
+	qcom,board-id = <8 0>;
+};
+
+&dsi_dual_nt35597_cmd {
+	qcom,mdss-dsi-bl-min-level = <1>;
+	qcom,mdss-dsi-bl-max-level = <248>;
+	qcom,mdss-dsi-bl-pmic-control-type = "bl_ctrl_dcs";
+	qcom,partial-update-enabled;
+	/*
+	 * 64 DSI byte-clocks of idle after each 720-wide line, and burst
+	 * disabled. Command-mode burst was packing lines together; the
+	 * dual-gate bands then crawl. 2A 0..719 did not change that.
+	 */
+	qcom,mdss-dsi-hor-line-idle = <0 720 64>;
+	/*
+	 * Autorefresh writes each pingpong on its own and skips CTL_START.
+	 * Split display only starts both interfaces from the master's
+	 * CTL_START, so leave autorefresh off.
+	 */
+	/*
+	 * On-command runs on each controller in turn, including the 101 ms
+	 * sleep-out wait. The right port would leave sleep a full command
+	 * list later and the dual-gate locks to a different line. Broadcast
+	 * sends each DCS byte to both ports from the same trigger.
+	 */
+	qcom,cmd-sync-wait-broadcast;
+	/*
+	 * One frame, not the 0xfff0 default. The read pointer has to wrap
+	 * before the next transfer; 0xfff0 takes about 25 frames, so the
+	 * next kickoff starts while the previous one is still on a random
+	 * line.
+	 */
+	qcom,mdss-tear-check-sync-cfg-height = <2576>;
+	/*
+	 * Bootloader splash handoff skips the reset GPIO. fastboot has
+	 * just programmed the panel, a reboot from recovery has not.
+	 * Force the same GPIO reset and on-command on every boot.
+	 * BTA during command-mode scanout leaves DSI0 CMD_DMA_BUSY.
+	 */
+	qcom,mdss-dsi-disable-cont-splash;
+	/delete-property/ qcom,esd-check-enabled;
+	/delete-property/ qcom,mdss-dsi-panel-status-check-mode;
+	/*
+	 * Display-off is 0x28 and tear-off is 0x34. With the link left in
+	 * HS, those run while command-mode autorefresh still owns the DMA
+	 * engine and time out (DSI status 0x7). LP sends them after the
+	 * interface is stopped.
+	 */
+	qcom,mdss-dsi-off-command-state = "dsi_lp_mode";
+	/* Factory payloads. Page 0x24 and 3B read back correctly on image 8.
+	 * Do not send 28 ahead of this list. The factory sequence has none.
+	 */
+	qcom,mdss-dsi-on-command = [
+		15 01 00 00 10 00 02 ff 10
+		15 01 00 00 10 00 02 fb 01
+		15 01 00 00 10 00 02 ba 03
+		15 01 00 00 10 00 02 e5 01
+		15 01 00 00 10 00 02 35 00
+		15 01 00 00 10 00 02 bb 10
+		15 01 00 00 10 00 02 b0 03
+		39 01 00 00 10 00 06 3b 03 08 08 64 9a
+		15 01 00 00 10 00 02 ff 20
+		15 01 00 00 10 00 02 fb 01
+		15 01 00 00 10 00 02 6d 88
+		15 01 00 00 10 00 02 ff 24
+		15 01 00 00 10 00 02 fb 01
+		15 01 00 00 10 00 02 74 0c
+		15 01 00 00 10 00 02 75 14
+		15 01 00 00 10 00 02 7e 0c
+		15 01 00 00 10 00 02 7f 14
+		15 01 00 00 10 00 02 c6 07
+		15 01 00 00 10 00 02 c8 10
+		15 01 00 00 10 00 02 cf 33
+		15 01 00 00 10 00 02 d0 01
+		15 01 00 00 10 00 02 ff e0
+		15 01 00 00 10 00 02 fb 01
+		15 01 00 00 10 00 02 6b 3d
+		15 01 00 00 10 00 02 6c 3d
+		15 01 00 00 10 00 02 6d 3d
+		15 01 00 00 10 00 02 6e 3d
+		15 01 00 00 10 00 02 6f 3d
+		15 01 00 00 10 00 02 35 02
+		15 01 00 00 10 00 02 36 79
+		15 01 00 00 10 00 02 37 10
+		15 01 00 00 10 00 02 3f 0c
+		15 01 00 00 10 00 02 08 c0
+		15 01 00 00 10 00 02 ff 10
+		05 01 00 00 65 00 02 11 00
+		05 01 00 00 29 00 02 29 00
+		15 01 00 00 10 00 02 53 2c
+		15 01 00 00 10 00 02 55 01];
+};
+
+/*
+ * pm8994_l14 is DSI vddio and the maXTouch vdd_io. The shared entry's
+ * disable load of 80 uA puts that LDO in LPM while the touch controller
+ * is still powered from it. A scan that finishes then resets the touch
+ * chip; a stuck scan does not, which is why a clean picture and a dead
+ * touch show up together.
+ */
+&dsi_panel_pwr_supply {
+	qcom,panel-supply-entry@0 {
+		qcom,supply-disable-load = <62000>;
+	};
+};
+
+&tlmm {
+	g0215d_touch_default: g0215d_touch_default {
+		mux {
+			pins = "gpio89", "gpio125";
+			function = "gpio";
+		};
+
+		irq_config {
+			pins = "gpio125";
+			drive-strength = <6>;
+			bias-pull-up;
+		};
+
+		reset_config {
+			pins = "gpio89";
+			drive-strength = <6>;
+			bias-disable;
+		};
+	};
+};
+
+/* i2c12 is i2c@75ba000, so the device shows up as 12-004a.
+ * Live touch_vdd is pm8994_l22 at 3.3V. vdd_io follows the LeEco
+ * and MTP wiring to pm8994_l14 at 1.8V. No atmel,fw_version: the
+ * ramdisk script loads A4_2F_4.0_05.fw and the OBP_RAW config.
+ * T15 codes are the live touch_keyevent list.
+ */
+&i2c_12 {
+	/delete-node/ synaptics@20;
+
+	atmel_mxt_ts@4a {
+		compatible = "atmel,atmel_mxt_ts";
+		reg = <0x4a>;
+		interrupt-parent = <&tlmm>;
+		interrupts = <125 0x2008>;
+		vdd_io-supply = <&pm8994_l14>;
+		avdd-supply = <&pm8994_l22>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&g0215d_touch_default>;
+		atmel,reset-gpio = <&tlmm 89 0>;
+		atmel,cap-button-codes = <139 172 158>;
+	};
+};

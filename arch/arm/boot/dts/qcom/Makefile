@@ -74,7 +74,7 @@ dtb-$(CONFIG_ARCH_MSM8996) += msm8996-v2-pmi8994-cdp.dtb \
 	msm8996-v3-pmi8994-pm8004-pmk8001-cdp.dtb \
 	msm8996-v3-pmi8994-pm8004-pmk8001-mtp.dtb \
 	msm8996-v3-pmi8996-cdp.dtb \
-	msm8996-v3-pmi8996-mtp.dtb \
+	g0215d-msm8996-v3-pmi8996-mtp.dtb \
 	msm8996-v3-pmi8996-pmk8001-cdp.dtb \
 	msm8996-v3-pmi8996-pmk8001-mtp.dtb \
 	msm8996-v3-fluid.dtb \
@@ -165,7 +165,6 @@ dtb-$(CONFIG_ARCH_MSM8996) += msm8996-v2-pmi8994-cdp.dtb \
 	apq8096-v3-pmi8996-mdm9x55-i2s-cdp.dtb \
 	apq8096-v3-pmi8994-mdm9x55-i2s-mtp.dtb \
 	apq8096-v3-pmi8994-mdm9x55-slimbus-mtp.dtb \
-	apq8096-v3-pmi8996-mdm9x55-i2s-mtp.dtb \
 	apq8096-v3-pmi8996-mdm9x55-slimbus-mtp.dtb \
 	apq8096-v3-pmi8996-dragonboard.dtb \
 	msm8996-auto-mizar.dtb

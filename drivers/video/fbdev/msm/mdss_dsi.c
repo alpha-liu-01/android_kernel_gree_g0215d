@@ -1562,6 +1562,8 @@ int mdss_dsi_on(struct mdss_panel_data *pdata)
 	mdss_dsi_clk_ctrl(ctrl_pdata, ctrl_pdata->dsi_clk_handle,
 			  MDSS_DSI_LINK_CLK, MDSS_DSI_CLK_ON);
 	mdss_dsi_sw_reset(ctrl_pdata, true);
+	mdss_dsi_set_burst_mode(ctrl_pdata);
+	mdss_dsi_set_line_idle(ctrl_pdata, pinfo->xres);
 
 	/*
 	 * Issue hardware reset line after enabling the DSI clocks and data
@@ -1724,6 +1726,30 @@ error:
 	return ret;
 }
 
+static void mdss_dsi_idle_cmd_dma(struct mdss_dsi_ctrl_pdata *ctrl)
+{
+	u32 status;
+
+	if (!ctrl || !ctrl->ctrl_base)
+		return;
+
+	status = MIPI_INP(ctrl->ctrl_base + 0x0008);
+	if (!(status & 0x02))
+		return;
+
+	/*
+	 * Tear-off and display-off share this engine with the frame just
+	 * sent. Waiting out the 200 ms DMA timeout holds the link, the
+	 * touch I2C on the same 1.8 V rail fails, and the following T100
+	 * write leaves the chip in CFGERR. Drop the stuck transfer first.
+	 */
+	pr_info("%s: ndx=%d status=%x, idle before panel cmd\n",
+		__func__, ctrl->ndx, status);
+	mdss_dsi_sw_reset(ctrl, true);
+	mdss_dsi_set_burst_mode(ctrl);
+	mdss_dsi_set_line_idle(ctrl, ctrl->panel_data.panel_info.xres);
+}
+
 static int mdss_dsi_blank(struct mdss_panel_data *pdata, int power_state)
 {
 	int ret = 0;
@@ -1744,6 +1770,13 @@ static int mdss_dsi_blank(struct mdss_panel_data *pdata, int power_state)
 
 	mdss_dsi_clk_ctrl(ctrl_pdata, ctrl_pdata->dsi_clk_handle,
 			  MDSS_DSI_ALL_CLKS, MDSS_DSI_CLK_ON);
+
+	if (pdata->panel_info.type == MIPI_CMD_PANEL) {
+		mdss_dsi_idle_cmd_dma(ctrl_pdata);
+		if (mdss_dsi_sync_wait_trigger(ctrl_pdata))
+			mdss_dsi_idle_cmd_dma(
+				mdss_dsi_get_other_ctrl(ctrl_pdata));
+	}
 
 	if (mdss_panel_is_power_on_lp(power_state)) {
 		pr_debug("%s: low power state requested\n", __func__);
@@ -1869,6 +1902,8 @@ int mdss_dsi_cont_splash_on(struct mdss_panel_data *pdata)
 
 	mdss_dsi_ctrl_setup(ctrl_pdata);
 	mdss_dsi_sw_reset(ctrl_pdata, true);
+	mdss_dsi_set_burst_mode(ctrl_pdata);
+	mdss_dsi_set_line_idle(ctrl_pdata, pdata->panel_info.xres);
 	pr_debug("%s-:End\n", __func__);
 	return ret;
 }
@@ -2524,13 +2559,11 @@ static int mdss_dsi_ctl_partial_roi(struct mdss_panel_data *pdata)
 
 static int mdss_dsi_set_stream_size(struct mdss_panel_data *pdata)
 {
-	u32 stream_ctrl, stream_total, idle;
+	u32 stream_ctrl, stream_total;
 	struct mdss_dsi_ctrl_pdata *ctrl_pdata = NULL;
 	struct mdss_panel_info *pinfo;
 	struct dsc_desc *dsc = NULL;
 	struct mdss_rect *roi;
-	struct panel_horizontal_idle *pidle;
-	int i;
 
 	if (pdata == NULL) {
 		pr_err("%s: Invalid input data\n", __func__);
@@ -2573,24 +2606,7 @@ static int mdss_dsi_set_stream_size(struct mdss_panel_data *pdata)
 	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x64, stream_total);
 	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x5C, stream_total);
 
-	/* set idle control -- dsi clk cycle */
-	idle = 0;
-	pidle = ctrl_pdata->line_idle;
-	for (i = 0; i < ctrl_pdata->horizontal_idle_cnt; i++) {
-		if (roi->w > pidle->min && roi->w <= pidle->max) {
-			idle = pidle->idle;
-			pr_debug("%s: ndx=%d w=%d range=%d-%d idle=%d\n",
-				__func__, ctrl_pdata->ndx, roi->w,
-				pidle->min, pidle->max, pidle->idle);
-			break;
-		}
-		pidle++;
-	}
-
-	if (idle)
-		idle |= BIT(12);	/* enable */
-
-	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x194, idle);
+	mdss_dsi_set_line_idle(ctrl_pdata, roi->w);
 
 	if (dsc)
 		mdss_dsi_dsc_config(ctrl_pdata, dsc);
@@ -2664,6 +2680,8 @@ static int mdss_dsi_reset_write_ptr(struct mdss_panel_data *pdata)
 			  MDSS_DSI_ALL_CLKS, MDSS_DSI_CLK_ON);
 	/* Need to reset the DSI core since the pixel stream was stopped. */
 	mdss_dsi_sw_reset(ctrl_pdata, true);
+	mdss_dsi_set_burst_mode(ctrl_pdata);
+	mdss_dsi_set_line_idle(ctrl_pdata, pinfo->xres);
 
 	/*
 	 * Reset the partial update co-ordinates to the panel height and
@@ -4495,7 +4513,7 @@ static int mdss_dsi_parse_ctrl_params(struct platform_device *ctrl_pdev,
 		(pinfo->pdest == DISPLAY_2))
 		ctrl_pdata->cmd_sync_wait_trigger = true;
 
-	pr_debug("%s: cmd_sync_wait_enable=%d trigger=%d\n", __func__,
+	pr_info("%s: cmd_sync_wait_enable=%d trigger=%d\n", __func__,
 				ctrl_pdata->cmd_sync_wait_broadcast,
 				ctrl_pdata->cmd_sync_wait_trigger);
 
@@ -4749,6 +4767,15 @@ int dsi_panel_device_register(struct platform_device *ctrl_pdev,
 	pinfo->cont_splash_enabled =
 		ctrl_pdata->mdss_util->panel_intf_status(pinfo->pdest,
 		MDSS_PANEL_INTF_DSI) ? true : false;
+
+	/*
+	 * A warm reboot leaves the NT35597 mid-scan and the bootloader
+	 * reports the interface as already on. Splash handoff then skips
+	 * the reset pulse. fastboot has just done a full init, so that
+	 * skip is usually clean; a reboot from recovery is not.
+	 */
+	if (pinfo->cont_splash_disabled)
+		pinfo->cont_splash_enabled = false;
 
 	pr_info("%s: Continuous splash %s\n", __func__,
 		pinfo->cont_splash_enabled ? "enabled" : "disabled");

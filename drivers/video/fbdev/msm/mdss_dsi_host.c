@@ -1017,8 +1017,20 @@ void mdss_dsi_controller_cfg(int enable,
 	if (readl_poll_timeout(((ctrl_pdata->ctrl_base) + 0x0008),
 			   status,
 			   ((status & 0x02) == 0),
-			       sleep_us, timeout_us))
-		pr_info("%s: DSI status=%x failed\n", __func__, status);
+			       sleep_us, timeout_us)) {
+		pr_info("%s: DSI status=%x failed, resetting cmd dma\n",
+			__func__, status);
+		/*
+		 * 0x02 sticks across the next frame. A sw reset here is
+		 * what the video-engine path already does for 0x08. Leave
+		 * the command engine idle before the controller is enabled
+		 * again, and put burst and line-idle back.
+		 */
+		mdss_dsi_sw_reset(ctrl_pdata, true);
+		mdss_dsi_set_burst_mode(ctrl_pdata);
+		mdss_dsi_set_line_idle(ctrl_pdata,
+			ctrl_pdata->panel_data.panel_info.xres);
+	}
 
 	/* Check for x_HS_FIFO_EMPTY */
 	if (readl_poll_timeout(((ctrl_pdata->ctrl_base) + 0x000c),
@@ -1300,6 +1312,31 @@ void mdss_dsi_dsc_config(struct mdss_dsi_ctrl_pdata *ctrl, struct dsc_desc *dsc)
 	MIPI_OUTP((ctrl->ctrl_base) + offset, data);
 }
 
+void mdss_dsi_set_line_idle(struct mdss_dsi_ctrl_pdata *ctrl, u32 width)
+{
+	struct panel_horizontal_idle *pidle;
+	u32 idle = 0;
+	int i;
+
+	if (!ctrl || !ctrl->idle_enabled || !ctrl->ctrl_base)
+		return;
+
+	pidle = ctrl->line_idle;
+	for (i = 0; i < ctrl->horizontal_idle_cnt; i++) {
+		if (width > pidle->min && width <= pidle->max) {
+			idle = pidle->idle;
+			break;
+		}
+		pidle++;
+	}
+
+	if (idle)
+		idle |= BIT(12);
+
+	/* DSI_COMMAND_MODE_MDP_IDLE_CTRL. 0 keeps burst packing. */
+	MIPI_OUTP(ctrl->ctrl_base + 0x194, idle);
+}
+
 void mdss_dsi_set_burst_mode(struct mdss_dsi_ctrl_pdata *ctrl)
 {
 	u32 data;
@@ -1466,6 +1503,9 @@ static void mdss_dsi_mode_setup(struct mdss_panel_data *pdata)
 		/* DSI_COMMAND_MODE_MDP_STREAM_TOTAL */
 		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x64, stream_total);
 		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x5C, stream_total);
+
+		/* Partial update is not required for the idle gap. */
+		mdss_dsi_set_line_idle(ctrl_pdata, width);
 	}
 
 	mdss_dsi_dsc_config(ctrl_pdata, dsc);
@@ -2896,6 +2936,8 @@ static void __dsi_fifo_error_handler(struct mdss_dsi_ctrl_pdata *ctrl,
 	mdss_dsi_clk_ctrl(ctrl, ctrl->dsi_clk_handle, MDSS_DSI_ALL_CLKS,
 		  MDSS_DSI_CLK_ON);
 	mdss_dsi_sw_reset(ctrl, true);
+	mdss_dsi_set_burst_mode(ctrl);
+	mdss_dsi_set_line_idle(ctrl, ctrl->panel_data.panel_info.xres);
 	if (recovery_needed)
 		ctrl->recovery->fxn(ctrl->recovery->data,
 			MDP_INTF_DSI_CMD_FIFO_UNDERFLOW);
@@ -2907,6 +2949,8 @@ static void __dsi_fifo_error_handler(struct mdss_dsi_ctrl_pdata *ctrl,
 		mdss_dsi_clk_ctrl(sctrl, sctrl->dsi_clk_handle,
 			MDSS_DSI_ALL_CLKS, MDSS_DSI_CLK_ON);
 		mdss_dsi_sw_reset(sctrl, true);
+		mdss_dsi_set_burst_mode(sctrl);
+		mdss_dsi_set_line_idle(sctrl, sctrl->panel_data.panel_info.xres);
 		mdss_dsi_clk_ctrl(sctrl, sctrl->dsi_clk_handle,
 			MDSS_DSI_ALL_CLKS, MDSS_DSI_CLK_OFF);
 	}

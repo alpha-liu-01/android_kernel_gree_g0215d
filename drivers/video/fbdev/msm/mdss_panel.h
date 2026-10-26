@@ -849,6 +849,7 @@ struct mdss_panel_info {
 	struct mdss_panel_roi_alignment roi_alignment;
 
 	u32 cont_splash_enabled;
+	bool cont_splash_disabled;
 	bool esd_rdy;
 	u32 partial_update_supported; /* value from dts if pu is supported */
 	u32 partial_update_enabled; /* is pu currently allowed */
@@ -945,6 +946,9 @@ struct mdss_panel_info {
 
 	/* esc clk recommended for the panel */
 	u32 esc_clk_rate_hz;
+
+	/* Command-mode autorefresh interval in frames. 0 leaves it off. */
+	u32 cmd_autorefresh;
 };
 
 struct mdss_panel_timing {
