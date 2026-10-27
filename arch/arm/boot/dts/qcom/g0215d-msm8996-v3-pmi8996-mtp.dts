@@ -161,3 +161,16 @@
 		atmel,cap-button-codes = <139 172 158>;
 	};
 };
+
+/* Donor msm8996.dtsi publishes an AVB vendor fstab and a vbmeta chain
+ * (vbmeta, dtbo, vendor). This GPT has none of those. First-stage init
+ * prefers the DT fstab over the ramdisk one, then waits for the chain.
+ * status disabled makes ReadFstabFromDt fail so /fstab.qcom is used.
+ */
+&firmware {
+	android {
+		fstab {
+			status = "disabled";
+		};
+	};
+};
