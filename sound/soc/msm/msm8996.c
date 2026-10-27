@@ -7124,8 +7124,10 @@ static int msm_audrx_init(struct snd_soc_pcm_runtime *rtd)
 	/*
 	 * Send speaker configuration only for WSA8810.
 	 * Defalut configuration is for WSA8815.
+	 * rtd_aux points past the DAI link runtimes; it is only valid when
+	 * the card has aux devices.
 	 */
-	if (rtd_aux && rtd_aux->component)
+	if (rtd->card->num_aux_devs && rtd_aux && rtd_aux->component)
 		if (!strcmp(rtd_aux->component->name, WSA8810_NAME_1) ||
 		    !strcmp(rtd_aux->component->name, WSA8810_NAME_2)) {
 			tasha_set_spkr_mode(rtd->codec, SPKR_MODE_1);
@@ -9963,6 +9965,12 @@ static struct snd_soc_card *populate_snd_card_dailinks(struct device *dev)
 				msm8996_quat_mi2s_tfa98xx_dai_links[0].codec_name = "tfa98xx.3-0034";
 				msm8996_quat_mi2s_tfa98xx_dai_links[0].codec_dai_name = "tfa98xx-aif-3-34";
 			}
+			of_property_read_string(dev->of_node,
+				"qcom,tfa98xx-codec-name",
+				&msm8996_quat_mi2s_tfa98xx_dai_links[0].codec_name);
+			of_property_read_string(dev->of_node,
+				"qcom,tfa98xx-codec-dai-name",
+				&msm8996_quat_mi2s_tfa98xx_dai_links[0].codec_dai_name);
 			memcpy(msm8996_tasha_dai_links + len_4,
 				msm8996_quat_mi2s_tfa98xx_dai_links,
 				sizeof(msm8996_quat_mi2s_tfa98xx_dai_links));

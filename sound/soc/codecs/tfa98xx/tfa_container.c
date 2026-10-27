@@ -91,11 +91,25 @@ void tfaContShowHeader(TfaHeader_t *hdr) {
 }
 
 /*
+ * Older containers (TFA9890 "PM1_00", e.g. Gree G0215D and OnePlus 3) have
+ * no nliveData field; their index starts where nliveData is.
+ */
+static TfaDescPtr_t *tfaContIndex(TfaContainer_t *cont)
+{
+	TfaDescPtr_t *legacy = (TfaDescPtr_t *)&cont->nliveData;
+
+	if (cont->index[0].type != dscDevice && legacy[0].type == dscDevice)
+		return legacy;
+	return cont->index;
+}
+
+/*
  * return device list dsc from index
  */
 TfaDeviceList_t *tfaContGetDevList(TfaContainer_t *cont, int dev_idx)
 {
 	uint8_t *base = (uint8_t *)cont;
+	TfaDescPtr_t *index;
 
 	if (cont == NULL)
 		return NULL;
@@ -103,10 +117,11 @@ TfaDeviceList_t *tfaContGetDevList(TfaContainer_t *cont, int dev_idx)
 	if ((dev_idx < 0) || (dev_idx >= cont->ndev))
 		return NULL;
 
-	if (cont->index[dev_idx].type != dscDevice)
+	index = tfaContIndex(cont);
+	if (index[dev_idx].type != dscDevice)
 		return NULL;
 
-	base += cont->index[dev_idx].offset;
+	base += index[dev_idx].offset;
 	return (TfaDeviceList_t *)base;
 }
 
@@ -923,7 +938,7 @@ int tfa_cont_get_idx(struct tfa_device *tfa)
 
 	for (i = 0; i < tfa->cnt->ndev; i++) {
 		dev = tfaContDevice(tfa->cnt, i);
-		if (dev->dev == tfa->slave_address)
+		if (dev && dev->dev == tfa->slave_address)
 			break;
 
 	}
