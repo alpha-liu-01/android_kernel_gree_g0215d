@@ -137,6 +137,126 @@
 			bias-disable;
 		};
 	};
+
+	g0215d_spi5_active: g0215d_spi5_active {
+		mux {
+			pins = "gpio81", "gpio83", "gpio84";
+			function = "blsp_spi5";
+		};
+
+		config {
+			pins = "gpio81", "gpio83", "gpio84";
+			drive-strength = <6>;
+			bias-disable;
+		};
+	};
+
+	g0215d_spi5_sleep: g0215d_spi5_sleep {
+		mux {
+			pins = "gpio81", "gpio83", "gpio84";
+			function = "blsp_spi5";
+		};
+
+		config {
+			pins = "gpio81", "gpio83", "gpio84";
+			drive-strength = <6>;
+			bias-disable;
+		};
+	};
+
+	g0215d_spi5_miso: g0215d_spi5_miso {
+		mux {
+			pins = "gpio82";
+			function = "blsp_spi5";
+		};
+
+		config {
+			pins = "gpio82";
+			drive-strength = <10>;
+			bias-pull-up;
+		};
+	};
+
+	g0215d_fp_active: g0215d_fp_active {
+		mux {
+			pins = "gpio51", "gpio121";
+			function = "gpio";
+		};
+
+		reset_config {
+			pins = "gpio51";
+			drive-strength = <16>;
+			bias-pull-down;
+		};
+
+		irq_config {
+			pins = "gpio121";
+			drive-strength = <16>;
+			bias-disable;
+		};
+	};
+
+	g0215d_fp_suspend: g0215d_fp_suspend {
+		mux {
+			pins = "gpio51", "gpio121";
+			function = "gpio";
+		};
+
+		reset_config {
+			pins = "gpio51";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+
+		irq_config {
+			pins = "gpio121";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};
+
+/* Stock spi@7579000 (BLSP1 QUP5) carries the Goodix GF816M under the
+ * front Home switch. The sensor also reads the two capacitive keys
+ * beside it. Stock left BAM off on this bus. Reset is GPIO 51, IRQ is
+ * GPIO 121, vdd is pm8994_l19 at 3.0V.
+ */
+&soc {
+	spi@7579000 { /* BLSP1 QUP5 */
+		compatible = "qcom,spi-qup-v2";
+		#address-cells = <1>;
+		#size-cells = <0>;
+		reg-names = "spi_physical", "spi_bam_physical";
+		reg = <0x07579000 0x600>,
+		      <0x07544000 0x2b000>;
+		interrupt-names = "spi_irq", "spi_bam_irq";
+		interrupts = <0 99 0>, <0 238 0>;
+		spi-max-frequency = <19200000>;
+		qcom,infinite-mode = <0>;
+		qcom,ver-reg-exists;
+		qcom,bam-consumer-pipe-index = <20>;
+		qcom,bam-producer-pipe-index = <21>;
+		qcom,master-id = <86>;
+		qcom,use-pinctrl;
+		pinctrl-names = "spi_default", "spi_sleep";
+		pinctrl-0 = <&g0215d_spi5_active>;
+		pinctrl-1 = <&g0215d_spi5_sleep>;
+		clock-names = "iface_clk", "core_clk";
+		clocks = <&clock_gcc clk_gcc_blsp1_ahb_clk>,
+			 <&clock_gcc clk_gcc_blsp1_qup5_spi_apps_clk>;
+
+		goodix_fp@0 {
+			compatible = "goodix,gf";
+			reg = <0>;
+			spi-max-frequency = <1000000>;
+			vdd-supply = <&pm8994_l19>;
+			goodix,spi_reset_gpio = <&tlmm 51 0>;
+			goodix,spi_irq_gpio = <&tlmm 121 0>;
+			pinctrl-names = "pmx_fp_active", "pmx_fp_suspend";
+			pinctrl-0 = <&g0215d_fp_active &g0215d_spi5_miso>;
+			pinctrl-1 = <&g0215d_fp_suspend>;
+		};
+	};
 };
 
 /* i2c12 is i2c@75ba000, so the device shows up as 12-004a.
@@ -159,6 +279,24 @@
 		pinctrl-0 = <&g0215d_touch_default>;
 		atmel,reset-gpio = <&tlmm 89 0>;
 		atmel,cap-button-codes = <139 172 158>;
+	};
+};
+
+/* Stock gpio_keys: PM8994 GPIO 5 is the front Home switch (KEY_HOME),
+ * GPIO 4 is the extra Gree key (KEY_F1). msm8996-mtp.dtsi still ships
+ * the MTP camera-shutter codes (FOCUS 528 / CAMERA 766).
+ */
+&soc {
+	gpio_keys {
+		cam_focus {
+			label = "key_home";
+			linux,code = <102>;
+		};
+
+		cam_snapshot {
+			label = "key_gree";
+			linux,code = <59>;
+		};
 	};
 };
 

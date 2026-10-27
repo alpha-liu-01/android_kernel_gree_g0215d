@@ -82,3 +82,4 @@ obj-$(CONFIG_INPUT_IDEAPAD_SLIDEBAR)	+= ideapad_slidebar.o
 obj-$(CONFIG_INPUT_PIXART_OTS_PAT9125_SWITCH)	+= ots_pat9125/
 obj-$(CONFIG_INPUT_STMVL53L0)                 += vl53L0/
 obj-$(CONFIG_HALL_SWITCH)				+= hall_switch.o
+obj-$(CONFIG_INPUT_GF816M_KEYS)		+= gf816m_keys.o
