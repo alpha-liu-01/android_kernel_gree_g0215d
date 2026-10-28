@@ -4,9 +4,11 @@
  * The two capacitive keys next to the front Home switch are read by the
  * GF816M fingerprint sensor, not by the Atmel touchscreen. The stock
  * kernel reported them from its Goodix SPI driver on an input device
- * named "tiny4412-key". This driver keeps that name and only does the
- * key path: power, reset, config, and the key bits of the IRQ status.
- * The sensor firmware lives in its own flash and is not rewritten here.
+ * named "tiny4412-key". This driver keeps that name and the key path,
+ * and also exposes /dev/goodix_fp for the stock Goodix userspace.
+ * Key mode is handled here. Image mode leaves the status register for
+ * userspace and wakes it on netlink protocol 25. The sensor firmware
+ * lives in its own flash and is not rewritten here.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,14 +19,20 @@
 #include <linux/gpio.h>
 #include <linux/input.h>
 #include <linux/interrupt.h>
+#include <linux/miscdevice.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/netlink.h>
 #include <linux/of_gpio.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/poll.h>
 #include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/spi/spi.h>
+#include <linux/uaccess.h>
 #include <linux/workqueue.h>
+#include <net/netlink.h>
+#include <net/net_namespace.h>
 
 #define GF_W			0xf0
 #define GF_R			0xf1
@@ -34,6 +42,7 @@
 #define GF_REG_MODE		0x8043
 #define GF_REG_CONFIG		0x8047
 #define GF_REG_STATUS		0x8140
+#define GF_REG_IMAGE		0x8141
 #define GF_REG_FW_STATE		0x41e4
 
 #define GF_FW_RUNNING		0xbe
@@ -48,6 +57,7 @@
 #define GF_MODE_DEBUG		0x56
 
 #define GF_STA_READY		BIT(7)
+#define GF_STA_IMAGE		BIT(6)
 #define GF_STA_HOME_MASK	BIT(5)
 #define GF_STA_HOME		BIT(4)
 #define GF_STA_BACK_MASK	BIT(3)
@@ -58,7 +68,33 @@
 #define GF_SPI_HZ		1000000
 #define GF_XFER_DELAY_US	5
 #define GF_MAX_XFER		256
+#define GF_MAX_USER_XFER	16384
 #define GF_ESD_MS		1000
+#define GF_NETLINK_ROUTE	25
+#define GF_NL_MSG_LEN		32
+
+/* libfphal ioctl numbers, 64-bit. */
+#define GF_IOC_RESET		0x00006700
+#define GF_IOC_TRANSFER		0xc0106701
+#define GF_IOC_SETSPEED		0x40046702
+#define GF_IOC_POWER_OFF	0x00006703
+#define GF_IOC_POWER_ON		0x00006704
+#define GF_IOC_DISABLE_IRQ	0x00006705
+#define GF_IOC_ENABLE_IRQ	0x00006706
+#define GF_IOC_SENDKEY		0x40086707
+
+struct gf_ioc_transfer {
+	u8 cmd;
+	u8 pad;
+	u16 addr;
+	u32 len;
+	u64 buf;
+};
+
+struct gf_key_event {
+	u32 code;
+	u32 value;
+};
 
 static bool report_home;
 module_param(report_home, bool, 0644);
@@ -106,9 +142,19 @@ struct gf816m {
 	bool back_down;
 	bool menu_down;
 	bool home_down;
+	bool irq_enabled;
+	bool misc_ready;
+	int open_count;
 	u8 tx[GF_MAX_XFER + 3];
 	u8 rx[GF_MAX_XFER + 1];
 };
+
+static struct gf816m *g_gf;
+static struct sock *gf_nl;
+static u32 gf_nl_pid;
+static struct fasync_struct *gf_async;
+
+static void gf_nl_send_irq(void);
 
 static int gf_write(struct gf816m *gf, u16 addr, const u8 *data, size_t len)
 {
@@ -245,11 +291,31 @@ static void gf_release_all(struct gf816m *gf)
 	gf_report(gf, KEY_HOME, &gf->home_down, false);
 }
 
+static void gf_report_status(struct gf816m *gf, u8 status)
+{
+	if (status & GF_STA_BACK_MASK)
+		gf_report(gf, KEY_BACK, &gf->back_down, status & GF_STA_BACK);
+	if (status & GF_STA_MENU_MASK)
+		gf_report(gf, KEY_MENU, &gf->menu_down, status & GF_STA_MENU);
+	if (report_home && (status & GF_STA_HOME_MASK))
+		gf_report(gf, KEY_HOME, &gf->home_down, status & GF_STA_HOME);
+	if (!(status & (GF_STA_BACK_MASK | GF_STA_MENU_MASK | GF_STA_HOME_MASK)))
+		gf_release_all(gf);
+}
+
+static bool gf_mode_is_capture(u8 mode)
+{
+	return mode == GF_MODE_IMAGE || mode == GF_MODE_FF ||
+	       mode == GF_MODE_DEBUG;
+}
+
 static irqreturn_t gf_irq(int irq, void *data)
 {
 	struct gf816m *gf = data;
 	struct device *dev = &gf->spi->dev;
 	u8 status = 0, mode = 0;
+	bool wake_user = false;
+	bool image_irq = false;
 
 	mutex_lock(&gf->lock);
 
@@ -264,33 +330,53 @@ static irqreturn_t gf_irq(int irq, void *data)
 
 	dev_dbg(dev, "status 0x%02x mode 0x%02x\n", status, mode);
 
-	switch (mode) {
-	case GF_MODE_IMAGE:
-	case GF_MODE_KEY:
-		if (status & GF_STA_BACK_MASK)
-			gf_report(gf, KEY_BACK, &gf->back_down,
-				  status & GF_STA_BACK);
-		if (status & GF_STA_MENU_MASK)
-			gf_report(gf, KEY_MENU, &gf->menu_down,
-				  status & GF_STA_MENU);
-		if (report_home && (status & GF_STA_HOME_MASK))
-			gf_report(gf, KEY_HOME, &gf->home_down,
-				  status & GF_STA_HOME);
-		if (!(status & (GF_STA_BACK_MASK | GF_STA_MENU_MASK |
-				GF_STA_HOME_MASK)))
-			gf_release_all(gf);
-		break;
-	case GF_MODE_SLEEP:
-		dev_warn(dev, "irq in sleep mode\n");
-		break;
-	default:
-		dev_warn(dev, "irq in mode 0x%02x\n", mode);
-		break;
+	/*
+	 * Once libfphal has armed O_ASYNC, it owns the status byte. That
+	 * includes calibration, which waits for SIGIO while the chip is
+	 * still in key mode. Clearing 0x8140 here leaves the daemon busy
+	 * forever and every later mode change is rejected.
+	 *
+	 * A ready image (bits 7 and 6) is SIGIO only. GF_Navigation clears
+	 * bit 7 as soon as a netlink message arrives, and the reader then
+	 * rejects the frame. The daemon also refuses that frame until it
+	 * has seen a HOME down/up (bit 5, no bit 6) and set g_touch_flag.
+	 * Those statuses are SIGIO too, and are not cleared here. They do
+	 * not go out on netlink: KeyProcessThread would call device_action
+	 * while capture is in state 2. BACK and MENU stay with the kernel,
+	 * including while the chip is left in image mode after cancel.
+	 */
+	if (gf_async && gf_mode_is_capture(mode)) {
+		if ((status & (GF_STA_READY | GF_STA_IMAGE)) ==
+		    (GF_STA_READY | GF_STA_IMAGE) ||
+		    (status & GF_STA_HOME_MASK)) {
+			wake_user = true;
+			image_irq = true;
+		} else {
+			gf_report_status(gf, status);
+			gf_write_byte(gf, GF_REG_STATUS, 0);
+		}
+		goto out;
 	}
+
+	if (gf_async || (gf_mode_is_capture(mode) && gf_nl_pid)) {
+		wake_user = true;
+		image_irq = gf_async && (status & GF_STA_IMAGE);
+		if (!image_irq && mode == GF_MODE_KEY)
+			gf_report_status(gf, status);
+		goto out;
+	}
+
+	if (mode == GF_MODE_KEY)
+		gf_report_status(gf, status);
 
 	gf_write_byte(gf, GF_REG_STATUS, 0);
 out:
 	mutex_unlock(&gf->lock);
+	if (wake_user) {
+		kill_fasync(&gf_async, SIGIO, POLL_IN);
+		if (!image_irq)
+			gf_nl_send_irq();
+	}
 	return IRQ_HANDLED;
 }
 
@@ -306,6 +392,11 @@ static void gf_esd_work(struct work_struct *work)
 	int tries;
 
 	mutex_lock(&gf->lock);
+	/* Userspace owns the chip while /dev/goodix_fp is open. */
+	if (gf->open_count) {
+		mutex_unlock(&gf->lock);
+		goto resched;
+	}
 	for (tries = 0; tries < 2; tries++) {
 		gf_read_byte(gf, GF_REG_HEARTBEAT, &hb);
 		gf_read_byte(gf, GF_REG_VERSION, &ver);
@@ -329,6 +420,7 @@ static void gf_esd_work(struct work_struct *work)
 		enable_irq(gf->irq);
 	}
 
+resched:
 	queue_delayed_work(system_freezable_power_efficient_wq, &gf->esd_work,
 			   msecs_to_jiffies(GF_ESD_MS));
 }
@@ -448,6 +540,322 @@ static int gf_setup_gpios(struct gf816m *gf)
 	return gf->irq < 0 ? gf->irq : 0;
 }
 
+static int gf_user_write(struct gf816m *gf, u16 addr, const u8 *data, u32 len)
+{
+	u8 *tx;
+	struct spi_transfer xfer = {
+		.delay_usecs = GF_XFER_DELAY_US,
+	};
+	struct spi_message msg;
+	int ret;
+
+	tx = kmalloc(len + 3, GFP_KERNEL);
+	if (!tx)
+		return -ENOMEM;
+	tx[0] = GF_W;
+	tx[1] = addr >> 8;
+	tx[2] = addr & 0xff;
+	memcpy(tx + 3, data, len);
+	xfer.tx_buf = tx;
+	xfer.len = len + 3;
+	spi_message_init(&msg);
+	spi_message_add_tail(&xfer, &msg);
+	ret = spi_sync(gf->spi, &msg);
+	kfree(tx);
+	return ret;
+}
+
+static int gf_user_read(struct gf816m *gf, u16 addr, u8 *data, u32 len)
+{
+	u8 *tx, *rx;
+	struct spi_transfer addr_xfer = {
+		.delay_usecs = GF_XFER_DELAY_US,
+		.len = 3,
+	};
+	struct spi_transfer data_xfer = {
+		.delay_usecs = GF_XFER_DELAY_US,
+		.len = len + 1,
+	};
+	struct spi_message msg;
+	int ret;
+
+	tx = kzalloc(len + 1, GFP_KERNEL);
+	rx = kzalloc(len + 1, GFP_KERNEL);
+	if (!tx || !rx) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	tx[0] = GF_W;
+	tx[1] = addr >> 8;
+	tx[2] = addr & 0xff;
+	addr_xfer.tx_buf = tx;
+	spi_message_init(&msg);
+	spi_message_add_tail(&addr_xfer, &msg);
+	ret = spi_sync(gf->spi, &msg);
+	if (ret)
+		goto out;
+
+	memset(tx, 0, len + 1);
+	tx[0] = GF_R;
+	data_xfer.tx_buf = tx;
+	data_xfer.rx_buf = rx;
+	spi_message_init(&msg);
+	spi_message_add_tail(&data_xfer, &msg);
+	ret = spi_sync(gf->spi, &msg);
+	if (!ret)
+		memcpy(data, rx + 1, len);
+out:
+	kfree(tx);
+	kfree(rx);
+	return ret;
+}
+
+static int gf_ioc_transfer(struct gf816m *gf, unsigned long arg)
+{
+	struct gf_ioc_transfer xfer;
+	u8 *buf;
+	int ret;
+
+	if (copy_from_user(&xfer, (void __user *)arg, sizeof(xfer)))
+		return -EFAULT;
+	if (!xfer.len || xfer.len > GF_MAX_USER_XFER)
+		return -EINVAL;
+	buf = kmalloc(xfer.len, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+	if (xfer.cmd == GF_W) {
+		if (copy_from_user(buf, (void __user *)(uintptr_t)xfer.buf,
+				   xfer.len))
+			ret = -EFAULT;
+		else
+			ret = gf_user_write(gf, xfer.addr, buf, xfer.len);
+	} else if (xfer.cmd == GF_R) {
+		ret = gf_user_read(gf, xfer.addr, buf, xfer.len);
+		if (!ret && copy_to_user((void __user *)(uintptr_t)xfer.buf,
+					 buf, xfer.len))
+			ret = -EFAULT;
+	} else {
+		ret = -EINVAL;
+	}
+	kfree(buf);
+	return ret;
+}
+
+static void gf_nl_input(struct sk_buff *skb)
+{
+	struct nlmsghdr *nlh;
+
+	if (!skb || skb->len < NLMSG_HDRLEN)
+		return;
+	nlh = nlmsg_hdr(skb);
+	gf_nl_pid = nlh->nlmsg_pid;
+}
+
+static int gf_nl_init(void)
+{
+	struct netlink_kernel_cfg cfg = {
+		.input = gf_nl_input,
+		.flags = NL_CFG_F_NONROOT_RECV | NL_CFG_F_NONROOT_SEND,
+	};
+
+	gf_nl = netlink_kernel_create(&init_net, GF_NETLINK_ROUTE, &cfg);
+	if (!gf_nl)
+		return -ENOMEM;
+	return 0;
+}
+
+static void gf_nl_send_irq(void)
+{
+	struct sk_buff *skb;
+	struct nlmsghdr *nlh;
+	char msg[GF_NL_MSG_LEN] = "irq";
+
+	if (!gf_nl || !gf_nl_pid)
+		return;
+	skb = nlmsg_new(GF_NL_MSG_LEN, GFP_KERNEL);
+	if (!skb)
+		return;
+	nlh = nlmsg_put(skb, 0, 0, 0, GF_NL_MSG_LEN, 0);
+	if (!nlh) {
+		kfree_skb(skb);
+		return;
+	}
+	memcpy(nlmsg_data(nlh), msg, sizeof(msg));
+	NETLINK_CB(skb).portid = 0;
+	NETLINK_CB(skb).dst_group = 0;
+	if (netlink_unicast(gf_nl, skb, gf_nl_pid, MSG_DONTWAIT) < 0)
+		pr_debug_ratelimited("gf816m netlink send failed\n");
+}
+
+static void gf_set_irq(struct gf816m *gf, bool enable)
+{
+	mutex_lock(&gf->lock);
+	if (enable == gf->irq_enabled) {
+		mutex_unlock(&gf->lock);
+		return;
+	}
+	gf->irq_enabled = enable;
+	mutex_unlock(&gf->lock);
+	if (enable)
+		enable_irq(gf->irq);
+	else
+		disable_irq(gf->irq);
+}
+
+static long gf_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+{
+	struct gf816m *gf = filp->private_data;
+	struct gf_key_event key;
+	u32 speed;
+	int ret = 0;
+	bool do_irq = false, irq_en = false;
+
+	if (!gf)
+		return -ENODEV;
+
+	mutex_lock(&gf->lock);
+	switch (cmd) {
+	case GF_IOC_RESET:
+		gf_hw_reset(gf);
+		msleep(300);
+		break;
+	case GF_IOC_TRANSFER:
+		ret = gf_ioc_transfer(gf, arg);
+		break;
+	case GF_IOC_SETSPEED:
+		if (copy_from_user(&speed, (void __user *)arg, sizeof(speed))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (speed && speed < 1000)
+			speed *= 1000000;
+		if (speed) {
+			gf->spi->max_speed_hz = speed;
+			ret = spi_setup(gf->spi);
+		}
+		break;
+	case GF_IOC_POWER_ON:
+	case GF_IOC_POWER_OFF:
+		/* The rail stays on so the capacitive keys keep working. */
+		break;
+	case GF_IOC_DISABLE_IRQ:
+		do_irq = true;
+		irq_en = false;
+		break;
+	case GF_IOC_ENABLE_IRQ:
+		do_irq = true;
+		irq_en = true;
+		break;
+	case GF_IOC_SENDKEY:
+		if (copy_from_user(&key, (void __user *)arg, sizeof(key))) {
+			ret = -EFAULT;
+			break;
+		}
+		if (key.code && key.code < KEY_CNT) {
+			input_report_key(gf->input, key.code, key.value);
+			input_sync(gf->input);
+		}
+		break;
+	default:
+		ret = -ENOTTY;
+		break;
+	}
+	mutex_unlock(&gf->lock);
+	if (do_irq)
+		gf_set_irq(gf, irq_en);
+	return ret;
+}
+
+/*
+ * libfphal reads one frame with read(), not the transfer ioctl. The
+ * frame starts at the byte after the status register: 13222 payload
+ * bytes, then a big-endian sum, 13225 bytes in total.
+ */
+static ssize_t gf_dev_read(struct file *filp, char __user *buf, size_t count,
+			   loff_t *ppos)
+{
+	struct gf816m *gf = filp->private_data;
+	u8 *kbuf;
+	int ret;
+
+	if (!gf)
+		return -ENODEV;
+	if (!count || count > GF_MAX_USER_XFER)
+		return -EINVAL;
+	kbuf = kmalloc(count, GFP_KERNEL);
+	if (!kbuf)
+		return -ENOMEM;
+	mutex_lock(&gf->lock);
+	ret = gf_user_read(gf, GF_REG_IMAGE, kbuf, count);
+	mutex_unlock(&gf->lock);
+	if (!ret) {
+		if (copy_to_user(buf, kbuf, count))
+			ret = -EFAULT;
+		else
+			ret = count;
+	}
+	kfree(kbuf);
+	return ret;
+}
+
+static int gf_dev_open(struct inode *inode, struct file *filp)
+{
+	struct gf816m *gf = g_gf;
+
+	if (!gf)
+		return -ENODEV;
+	filp->private_data = gf;
+	mutex_lock(&gf->lock);
+	gf->open_count++;
+	mutex_unlock(&gf->lock);
+	return 0;
+}
+
+static int gf_fasync(int fd, struct file *filp, int on)
+{
+	return fasync_helper(fd, filp, on, &gf_async);
+}
+
+static int gf_dev_release(struct inode *inode, struct file *filp)
+{
+	struct gf816m *gf = filp->private_data;
+	bool restore = false;
+
+	gf_fasync(-1, filp, 0);
+	mutex_lock(&gf->lock);
+	if (gf->open_count > 0)
+		gf->open_count--;
+	restore = !gf->open_count;
+	mutex_unlock(&gf->lock);
+	if (!restore)
+		return 0;
+	gf_set_irq(gf, true);
+	mutex_lock(&gf->lock);
+	gf->mode = GF_MODE_KEY;
+	if (gf_init_chip(gf))
+		dev_err(&gf->spi->dev, "restore key mode failed\n");
+	mutex_unlock(&gf->lock);
+	return 0;
+}
+
+static const struct file_operations gf_fops = {
+	.owner = THIS_MODULE,
+	.open = gf_dev_open,
+	.read = gf_dev_read,
+	.release = gf_dev_release,
+	.unlocked_ioctl = gf_ioctl,
+	.fasync = gf_fasync,
+#ifdef CONFIG_COMPAT
+	.compat_ioctl = gf_ioctl,
+#endif
+};
+
+static struct miscdevice gf_misc = {
+	.minor = MISC_DYNAMIC_MINOR,
+	.name = "goodix_fp",
+	.fops = &gf_fops,
+};
+
 static int gf_probe(struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
@@ -460,6 +868,7 @@ static int gf_probe(struct spi_device *spi)
 
 	gf->spi = spi;
 	gf->mode = GF_MODE_KEY;
+	g_gf = gf;
 	mutex_init(&gf->lock);
 	INIT_DELAYED_WORK(&gf->esd_work, gf_esd_work);
 	spi_set_drvdata(spi, gf);
@@ -497,9 +906,15 @@ static int gf_probe(struct spi_device *spi)
 
 	gf->input->name = "tiny4412-key";
 	gf->input->id.bustype = BUS_SPI;
-	input_set_capability(gf->input, EV_KEY, KEY_BACK);
-	input_set_capability(gf->input, EV_KEY, KEY_MENU);
-	input_set_capability(gf->input, EV_KEY, KEY_HOME);
+	__set_bit(EV_KEY, gf->input->evbit);
+	/*
+	 * Only the three navigation keys. Advertising every key code also
+	 * sets BTN_TOUCH, and EventHub then treats the device as a stylus
+	 * and drops the keyboard class.
+	 */
+	__set_bit(KEY_HOME, gf->input->keybit);
+	__set_bit(KEY_MENU, gf->input->keybit);
+	__set_bit(KEY_BACK, gf->input->keybit);
 
 	ret = input_register_device(gf->input);
 	if (ret)
@@ -511,6 +926,16 @@ static int gf_probe(struct spi_device *spi)
 	if (ret) {
 		dev_err(dev, "irq %d request failed: %d\n", gf->irq, ret);
 		goto err_power;
+	}
+	gf->irq_enabled = true;
+
+	ret = misc_register(&gf_misc);
+	if (ret) {
+		dev_err(dev, "/dev/goodix_fp failed: %d\n", ret);
+	} else {
+		gf->misc_ready = true;
+		if (gf_nl_init())
+			dev_err(dev, "netlink %d failed\n", GF_NETLINK_ROUTE);
 	}
 
 	ret = sysfs_create_group(&dev->kobj, &gf_attr_group);
@@ -533,6 +958,13 @@ static int gf_remove(struct spi_device *spi)
 	sysfs_remove_group(&spi->dev.kobj, &gf_attr_group);
 	devm_free_irq(&spi->dev, gf->irq, gf);
 	cancel_delayed_work_sync(&gf->esd_work);
+	if (gf->misc_ready)
+		misc_deregister(&gf_misc);
+	if (gf_nl) {
+		netlink_kernel_release(gf_nl);
+		gf_nl = NULL;
+	}
+	g_gf = NULL;
 	regulator_disable(gf->vdd);
 	return 0;
 }
@@ -554,5 +986,5 @@ static struct spi_driver gf816m_driver = {
 };
 module_spi_driver(gf816m_driver);
 
-MODULE_DESCRIPTION("Goodix GF816M touch keys for Gree G0215D");
+MODULE_DESCRIPTION("Goodix GF816M keys and fingerprint for Gree G0215D");
 MODULE_LICENSE("GPL v2");

@@ -901,6 +901,40 @@ static long msm_isp_ioctl_unlocked(struct v4l2_subdev *sd,
 		MSM_ISP_DUAL_VFE_MUTEX_UNLOCK(vfe_dev);
 		mutex_unlock(&vfe_dev->core_mutex);
 		break;
+	/*
+	 * Gree's Android 6 blobs send msm_vfe_axi_stream_cfg_cmd without
+	 * the trailing dummy field (44 bytes instead of 48). Translate it.
+	 */
+	case _IOWR('V', MSM_ISP_CFG_STREAM, struct {
+		uint8_t num_streams;
+		uint32_t stream_handle[VFE_AXI_SRC_MAX];
+		uint32_t cmd;
+		uint8_t sync_frame_id_src;
+	}): {
+		struct {
+			uint8_t num_streams;
+			uint32_t stream_handle[VFE_AXI_SRC_MAX];
+			uint32_t cmd;
+			uint8_t sync_frame_id_src;
+		} *old = arg;
+		struct msm_vfe_axi_stream_cfg_cmd cfg;
+		int i;
+
+		memset(&cfg, 0, sizeof(cfg));
+		cfg.num_streams = old->num_streams;
+		for (i = 0; i < VFE_AXI_SRC_MAX; i++)
+			cfg.stream_handle[i] = old->stream_handle[i];
+		cfg.cmd = old->cmd;
+		cfg.sync_frame_id_src = old->sync_frame_id_src;
+		mutex_lock(&vfe_dev->core_mutex);
+		MSM_ISP_DUAL_VFE_MUTEX_LOCK(vfe_dev);
+		rc = msm_isp_cfg_axi_stream(vfe_dev, &cfg);
+		MSM_ISP_DUAL_VFE_MUTEX_UNLOCK(vfe_dev);
+		mutex_unlock(&vfe_dev->core_mutex);
+		for (i = 0; i < VFE_AXI_SRC_MAX; i++)
+			old->stream_handle[i] = cfg.stream_handle[i];
+		break;
+	}
 	case VIDIOC_MSM_ISP_AXI_HALT:
 		mutex_lock(&vfe_dev->core_mutex);
 		MSM_ISP_DUAL_VFE_MUTEX_LOCK(vfe_dev);

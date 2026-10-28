@@ -45,6 +45,7 @@
 #include <linux/err.h>
 #include <linux/clk.h>
 #include <linux/firmware.h>
+#include <linux/of_gpio.h>
 #include <drv2604.h>
 
 static struct drv2604_platform_data  drv2604_plat_data = {
@@ -932,13 +933,31 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 		}
 	}
 
+	/*
+	 * Xiaomi boards hardcode enable on GPIO 93. Gree's DRV2605 enable
+	 * is motor,en-gpio (TLMM 74, active high). Drive it before the ID read.
+	 */
+	if (client->dev.of_node)
+		drv2604->PlatData.GpioEnable = of_get_named_gpio(client->dev.of_node,
+				"motor,en-gpio", 0);
+	else
+		drv2604->PlatData.GpioEnable = 93;
 
-	if (gpio_request(93, "vibrator-en") < 0) {
-		pr_err("drv2604: error requesting gpio\n");
-		return -EPERM;
+	if (drv2604->PlatData.GpioEnable < 0) {
+		err = drv2604->PlatData.GpioEnable;
+		pr_err("drv2604: enable gpio missing (%d)\n", err);
+		goto exit_gpio_request_failed;
 	}
 
-	gpio_direction_output(93, 1);
+	if (gpio_request(drv2604->PlatData.GpioEnable, "vibrator-en") < 0) {
+		pr_err("drv2604: error requesting gpio %d\n",
+				drv2604->PlatData.GpioEnable);
+		err = -EPERM;
+		drv2604->PlatData.GpioEnable = 0;
+		goto exit_gpio_request_failed;
+	}
+
+	gpio_direction_output(drv2604->PlatData.GpioEnable, 1);
 
 	mdelay(1);
 	err = drv2604_reg_read(drv2604, STATUS_REG);
@@ -972,15 +991,21 @@ static int drv2604_probe(struct i2c_client *client, const struct i2c_device_id *
 		break;
 	}
 
-	if (drv2604->device_id != DRV2604 && drv2604->device_id != DRV2604L) {
-		pr_debug("%s, status(0x%x),device_id(%d) fail\n",
-				__FUNCTION__, status, drv2604->device_id);
-		goto exit_gpio_request_failed;
-	} else {
+	/*
+	 * DRV2604 needs the waveform RAM image. DRV2605/DRV2605L play RTP
+	 * from the same timed_output node and have no drv2604.bin.
+	 */
+	if (drv2604->device_id == DRV2604 || drv2604->device_id == DRV2604L) {
 		err = request_firmware_nowait(THIS_MODULE, FW_ACTION_HOTPLUG,
 				"drv2604.bin", &(client->dev), GFP_KERNEL,
 				drv2604, HapticsFirmwareLoad);
-
+	} else if (drv2604->device_id != DRV2605_VER_1DOT1 &&
+			drv2604->device_id != DRV2605_VER_1DOT0 &&
+			drv2604->device_id != DRV2605L) {
+		pr_err("%s, status(0x%x),device_id(%d) fail\n",
+				__FUNCTION__, status, drv2604->device_id);
+		err = -ENODEV;
+		goto exit_gpio_request_failed;
 	}
 
 	drv2604_change_mode(drv2604, WORK_IDLE, DEV_READY);
@@ -1050,10 +1075,18 @@ static const struct i2c_device_id drv2604_id_table[] = {
 };
 MODULE_DEVICE_TABLE(i2c, drv2604_id_table);
 
+static const struct of_device_id drv2604_of_match[] = {
+	{ .compatible = "qcom,haptics-drv2605", },
+	{ .compatible = "vibrator,drv2604", },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, drv2604_of_match);
+
 static struct i2c_driver drv2604_driver = {
 	.driver = {
 		.name = HAPTICS_DEVICE_NAME,
 		.owner = THIS_MODULE,
+		.of_match_table = drv2604_of_match,
 	},
 	.id_table = drv2604_id_table,
 	.probe = drv2604_probe,

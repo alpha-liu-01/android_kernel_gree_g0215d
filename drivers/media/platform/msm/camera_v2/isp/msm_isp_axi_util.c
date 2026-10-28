@@ -2272,7 +2272,6 @@ int msm_isp_drop_frame(struct vfe_device *vfe_dev,
 	struct msm_isp_bufq *bufq = NULL;
 	uint32_t pingpong_bit;
 	int vfe_idx;
-	int rc = -1;
 
 	if (!vfe_dev || !stream_info || !ts || !sof_info) {
 		pr_err("%s %d vfe_dev %pK stream_info %pK ts %pK op_info %pK\n",
@@ -2285,46 +2284,26 @@ int msm_isp_drop_frame(struct vfe_device *vfe_dev,
 	pingpong_status =
 		~vfe_dev->hw_info->vfe_ops.axi_ops.get_pingpong_status(vfe_dev);
 
+	/*
+	 * Gree's Android 6 daemon predates reconfiguring the buffer for
+	 * the next SOF (and delaying its own request by one frame). It
+	 * expects the buffer to be reported as dropped, so do that.
+	 */
 	spin_lock_irqsave(&stream_info->lock, flags);
 	pingpong_bit =
 		(~(pingpong_status >> stream_info->wm[vfe_idx][0]) & 0x1);
 	done_buf = stream_info->buf[pingpong_bit];
-	if (done_buf &&
-		(stream_info->composite_irq[MSM_ISP_COMP_IRQ_EPOCH] == 0)) {
-		if ((stream_info->sw_ping_pong_bit != -1) &&
-			!vfe_dev->reg_updated) {
-			rc = msm_isp_cfg_ping_pong_address(
-				stream_info, ~pingpong_status, done_buf);
-			if (rc < 0) {
-				ISP_DBG("%s: Error configuring ping_pong\n",
-					__func__);
-				bufq = vfe_dev->buf_mgr->ops->get_bufq(
-					vfe_dev->buf_mgr,
-					done_buf->bufq_handle);
-				if (!bufq) {
-					spin_unlock_irqrestore(
-						&stream_info->lock,
-						flags);
-					pr_err("%s: Invalid bufq buf_handle %x\n",
-						__func__,
-						done_buf->bufq_handle);
-					return -EINVAL;
-				}
-				sof_info->reg_update_fail_mask_ext |=
-					(bufq->bufq_handle & 0xFF);
-			}
+	if (done_buf) {
+		bufq = vfe_dev->buf_mgr->ops->get_bufq(vfe_dev->buf_mgr,
+			done_buf->bufq_handle);
+		if (!bufq) {
+			spin_unlock_irqrestore(&stream_info->lock, flags);
+			pr_err("%s: Invalid bufq buf_handle %x\n",
+				__func__, done_buf->bufq_handle);
+			return -EINVAL;
 		}
-		/*Avoid Drop Frame and re-issue pingpong cfg*/
-		/*this notify is per ping and pong buffer*/
-		done_buf->is_drop_reconfig = 1;
-		stream_info->current_framedrop_period = 1;
-		/*Avoid Multiple request frames for single SOF*/
-		vfe_dev->axi_data.src_info[VFE_PIX_0].accept_frame = false;
-
-		if (stream_info->current_framedrop_period !=
-			stream_info->requested_framedrop_period) {
-			msm_isp_cfg_framedrop_reg(stream_info);
-		}
+		sof_info->reg_update_fail_mask_ext |=
+			(bufq->bufq_handle & 0xFF);
 	}
 	spin_unlock_irqrestore(&stream_info->lock, flags);
 
@@ -2334,8 +2313,6 @@ int msm_isp_drop_frame(struct vfe_device *vfe_dev,
 		/* no buf done come */
 		msm_isp_process_axi_irq_stream(vfe_dev, stream_info,
 			pingpong_status, ts);
-		if (done_buf)
-			done_buf->is_drop_reconfig = 0;
 	}
 	return 0;
 }
@@ -3741,9 +3718,6 @@ static int msm_isp_request_frame(struct vfe_device *vfe_dev,
 	rc = msm_isp_calculate_framedrop(vfe_dev, &stream_cfg_cmd);
 	if (0 == rc)
 		msm_isp_reset_framedrop(vfe_dev, stream_info);
-
-	/*Avoid Multiple request frames for single SOF*/
-	vfe_dev->axi_data.src_info[frame_src].accept_frame = false;
 
 	spin_unlock_irqrestore(&stream_info->lock, flags);
 

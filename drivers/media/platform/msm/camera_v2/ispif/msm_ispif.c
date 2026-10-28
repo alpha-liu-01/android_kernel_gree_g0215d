@@ -1913,6 +1913,22 @@ static long msm_ispif_subdev_ioctl_unlocked(struct v4l2_subdev *sd,
 		return msm_ispif_cmd(sd, arg);
 	case VIDIOC_MSM_ISPIF_CFG_EXT:
 		return msm_ispif_cmd_ext(sd, arg);
+	/*
+	 * Gree's Android 6 blobs predate reserved_param in
+	 * msm_ispif_param_data, so their ISPIF_CFG is 4 bytes short.
+	 * reserved_param == 0 keeps the default stop timeout.
+	 */
+	case _IOWR('V', BASE_VIDIOC_PRIVATE,
+		u8[sizeof(struct ispif_cfg_data) - sizeof(uint32_t)]): {
+		struct ispif_cfg_data cfg;
+		long rc;
+
+		memset(&cfg, 0, sizeof(cfg));
+		memcpy(&cfg, arg, sizeof(cfg) - sizeof(uint32_t));
+		rc = msm_ispif_cmd(sd, &cfg);
+		memcpy(arg, &cfg, sizeof(cfg) - sizeof(uint32_t));
+		return rc;
+	}
 	case MSM_SD_NOTIFY_FREEZE: {
 		ispif->ispif_sof_debug = 0;
 		ispif->ispif_rdi0_debug = 0;

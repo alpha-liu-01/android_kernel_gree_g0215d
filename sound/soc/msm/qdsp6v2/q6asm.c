@@ -3347,10 +3347,17 @@ static int __q6asm_open_write(struct audio_client *ac, uint32_t format,
 		open.dec_fmt_id = q6asm_get_pcm_format_id(pcm_format_block_ver);
 		break;
 	case FORMAT_MPEG4_AAC:
-		open.dec_fmt_id = ASM_MEDIA_FMT_AAC_V2;
-		break;
 	case FORMAT_MPEG4_MULTI_AAC:
+		/*
+		 * HeaacDecoderModule is in the ADSP image and its format id is
+		 * AAC_V2. The ACDB playback topology makes that open return
+		 * ADSP_EFAILED; MP3 on the same opcode succeeds. Ask for no
+		 * post-processing so the decoder session can come up.
+		 */
 		open.dec_fmt_id = ASM_MEDIA_FMT_AAC_V2;
+		open.postprocopo_id = ASM_STREAM_POSTPROCOPO_ID_NONE;
+		pr_err("%s: AAC open fmt 0x%x topo 0x%x\n", __func__,
+		       open.dec_fmt_id, open.postprocopo_id);
 		break;
 	case FORMAT_WMA_V9:
 		open.dec_fmt_id = ASM_MEDIA_FMT_WMA_V9_V2;
@@ -3623,10 +3630,17 @@ static int __q6asm_open_read_write(struct audio_client *ac, uint32_t rd_format,
 		open.dec_fmt_id = ASM_MEDIA_FMT_MULTI_CHANNEL_PCM_V2;
 		break;
 	case FORMAT_MPEG4_AAC:
-		open.dec_fmt_id = ASM_MEDIA_FMT_AAC_V2;
-		break;
 	case FORMAT_MPEG4_MULTI_AAC:
+		/*
+		 * HeaacDecoderModule is in the ADSP image and its format id is
+		 * AAC_V2. The ACDB playback topology makes that open return
+		 * ADSP_EFAILED; MP3 on the same opcode succeeds. Ask for no
+		 * post-processing so the decoder session can come up.
+		 */
 		open.dec_fmt_id = ASM_MEDIA_FMT_AAC_V2;
+		open.postprocopo_id = ASM_STREAM_POSTPROCOPO_ID_NONE;
+		pr_err("%s: AAC open fmt 0x%x topo 0x%x\n", __func__,
+		       open.dec_fmt_id, open.postprocopo_id);
 		break;
 	case FORMAT_WMA_V9:
 		open.dec_fmt_id = ASM_MEDIA_FMT_WMA_V9_V2;

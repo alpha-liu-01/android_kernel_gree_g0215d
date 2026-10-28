@@ -320,6 +320,16 @@ struct msm_fb_data_type {
 	u32 bl_level_scaled;
 	u32 bl_level_usr;
 	struct mutex bl_lock;
+	/*
+	 * Slider updates arrive faster than a DCS backlight command can be
+	 * sent. bl_pending is the latest request; bl_work applies it once
+	 * per TE without holding the sysfs caller.
+	 */
+	u32 bl_pending;
+	u32 bl_applied;
+	bool bl_work_running;
+	spinlock_t bl_pending_lock;
+	struct work_struct bl_work;
 	struct mutex mdss_sysfs_lock;
 	bool ipc_resume;
 

@@ -275,6 +275,61 @@ static int mdss_fb_notify_update(struct msm_fb_data_type *mfd,
 
 static int lcd_backlight_registered;
 
+static void mdss_fb_bl_work(struct work_struct *work)
+{
+	struct msm_fb_data_type *mfd =
+		container_of(work, struct msm_fb_data_type, bl_work);
+
+	for (;;) {
+		struct mdss_mdp_ctl *ctl = NULL;
+		u32 bl_lvl;
+		bool more;
+
+		spin_lock(&mfd->bl_pending_lock);
+		bl_lvl = mfd->bl_pending;
+		if (bl_lvl == mfd->bl_applied) {
+			mfd->bl_work_running = false;
+			if (mfd->bl_pending != mfd->bl_applied)
+				mfd->bl_work_running = true;
+			more = mfd->bl_work_running;
+			spin_unlock(&mfd->bl_pending_lock);
+			if (more)
+				continue;
+			return;
+		}
+		spin_unlock(&mfd->bl_pending_lock);
+
+		/*
+		 * Wait for TE here, not inside the DSI command. That wait
+		 * used to run with cmd_mutex held, so the frame commit
+		 * blocked until the next TE on every slider step.
+		 */
+		if (mfd->mdp.private1)
+			ctl = mfd_to_ctl(mfd);
+		if (ctl && ctl->ops.wait_for_vsync_fnc)
+			ctl->ops.wait_for_vsync_fnc(ctl);
+
+		spin_lock(&mfd->bl_pending_lock);
+		bl_lvl = mfd->bl_pending;
+		spin_unlock(&mfd->bl_pending_lock);
+		if (bl_lvl == mfd->bl_applied)
+			continue;
+
+		mutex_lock(&mfd->bl_lock);
+		mdss_fb_set_backlight(mfd, bl_lvl);
+		mutex_unlock(&mfd->bl_lock);
+
+		spin_lock(&mfd->bl_pending_lock);
+		mfd->bl_applied = bl_lvl;
+		more = mfd->bl_pending != mfd->bl_applied;
+		if (!more)
+			mfd->bl_work_running = false;
+		spin_unlock(&mfd->bl_pending_lock);
+		if (!more)
+			return;
+	}
+}
+
 static void mdss_fb_set_bl_brightness(struct led_classdev *led_cdev,
 				      enum led_brightness value)
 {
@@ -297,13 +352,21 @@ static void mdss_fb_set_bl_brightness(struct led_classdev *led_cdev,
 	if (!bl_lvl && value)
 		bl_lvl = 1;
 
-	if (!IS_CALIB_MODE_BL(mfd) && (!mfd->ext_bl_ctrl || !value ||
-							!mfd->bl_level)) {
-		mutex_lock(&mfd->bl_lock);
-		mdss_fb_set_backlight(mfd, bl_lvl);
-		mutex_unlock(&mfd->bl_lock);
-	}
 	mfd->bl_level_usr = bl_lvl;
+
+	if (IS_CALIB_MODE_BL(mfd) || (mfd->ext_bl_ctrl && value &&
+							mfd->bl_level))
+		return;
+
+	spin_lock(&mfd->bl_pending_lock);
+	mfd->bl_pending = bl_lvl;
+	if (!mfd->bl_work_running) {
+		mfd->bl_work_running = true;
+		spin_unlock(&mfd->bl_pending_lock);
+		schedule_work(&mfd->bl_work);
+	} else {
+		spin_unlock(&mfd->bl_pending_lock);
+	}
 }
 
 static enum led_brightness mdss_fb_get_bl_brightness(
@@ -1363,6 +1426,11 @@ static int mdss_fb_probe(struct platform_device *pdev)
 	INIT_LIST_HEAD(&mfd->file_list);
 
 	mutex_init(&mfd->bl_lock);
+	spin_lock_init(&mfd->bl_pending_lock);
+	mfd->bl_pending = mfd->bl_level;
+	mfd->bl_applied = mfd->bl_level;
+	mfd->bl_work_running = false;
+	INIT_WORK(&mfd->bl_work, mdss_fb_bl_work);
 	mutex_init(&mfd->mdss_sysfs_lock);
 	mutex_init(&mfd->switch_lock);
 
@@ -1502,6 +1570,7 @@ static int mdss_fb_remove(struct platform_device *pdev)
 	if (lcd_backlight_registered) {
 		lcd_backlight_registered = 0;
 		led_classdev_unregister(&backlight_led);
+		cancel_work_sync(&mfd->bl_work);
 	}
 
 	return 0;

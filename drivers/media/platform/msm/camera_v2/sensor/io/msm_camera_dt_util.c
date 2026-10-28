@@ -304,7 +304,9 @@ int msm_sensor_get_sub_module_index(struct device_node *of_node,
 			pr_err("%s:%d failed %d\n", __func__, __LINE__, rc);
 			goto ERROR;
 		}
+#if SUB_MODULE_IR_LED < SUB_MODULE_MAX
 		sensor_info->subdev_id[SUB_MODULE_IR_LED] = val;
+#endif
 		of_node_put(src_node);
 		src_node = NULL;
 	}
@@ -320,7 +322,9 @@ int msm_sensor_get_sub_module_index(struct device_node *of_node,
 			pr_err("%s:%d failed %d\n", __func__, __LINE__, rc);
 			goto ERROR;
 		}
+#if SUB_MODULE_IR_CUT < SUB_MODULE_MAX
 		sensor_info->subdev_id[SUB_MODULE_IR_CUT] = val;
+#endif
 		of_node_put(src_node);
 		src_node = NULL;
 	}

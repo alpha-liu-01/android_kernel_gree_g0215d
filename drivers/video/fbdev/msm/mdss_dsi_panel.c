@@ -265,7 +265,12 @@ static void mdss_dsi_panel_bklt_dcs(struct mdss_dsi_ctrl_pdata *ctrl, int level)
 	memset(&cmdreq, 0, sizeof(cmdreq));
 	cmdreq.cmds = &backlight_cmd;
 	cmdreq.cmds_cnt = 1;
-	cmdreq.flags = CMD_REQ_COMMIT | CMD_CLK_CTRL | CMD_REQ_DCS;
+	/*
+	 * CMD_REQ_DCS makes cmdlist_commit wait for the next TE while
+	 * cmd_mutex is held. A brightness drag then stalls every frame.
+	 * The caller waits for TE itself, outside that mutex.
+	 */
+	cmdreq.flags = CMD_REQ_COMMIT | CMD_CLK_CTRL;
 	cmdreq.rlen = 0;
 	cmdreq.cb = NULL;
 
@@ -933,23 +938,18 @@ static void mdss_dsi_panel_bl_ctrl(struct mdss_panel_data *pdata,
 			break;
 		}
 		/*
-		 * DCS commands to update backlight are usually sent at
-		 * the same time to both the controllers. However, if
-		 * sync_wait is enabled, we need to ensure that the
-		 * dcs commands are first sent to the non-trigger
-		 * controller so that when the commands are triggered,
-		 * both controllers receive it at the same time.
+		 * Broadcast from the trigger fires the same packet on both
+		 * ports. A second send on the other port waits another TE.
 		 */
-		sctrl = mdss_dsi_get_other_ctrl(ctrl_pdata);
 		if (mdss_dsi_sync_wait_trigger(ctrl_pdata)) {
-			if (sctrl)
-				mdss_dsi_panel_bklt_dcs(sctrl, bl_level);
 			mdss_dsi_panel_bklt_dcs(ctrl_pdata, bl_level);
-		} else {
-			mdss_dsi_panel_bklt_dcs(ctrl_pdata, bl_level);
-			if (sctrl)
-				mdss_dsi_panel_bklt_dcs(sctrl, bl_level);
+			break;
 		}
+		sctrl = mdss_dsi_get_other_ctrl(ctrl_pdata);
+		if (sctrl && mdss_dsi_sync_wait_trigger(sctrl))
+			mdss_dsi_panel_bklt_dcs(sctrl, bl_level);
+		else
+			mdss_dsi_panel_bklt_dcs(ctrl_pdata, bl_level);
 		break;
 	default:
 		pr_err("%s: Unknown bl_ctrl configuration\n",

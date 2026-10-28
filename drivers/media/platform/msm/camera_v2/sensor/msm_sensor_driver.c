@@ -301,6 +301,10 @@ static int32_t msm_sensor_fill_actuator_subdevid_by_name(
 static int32_t msm_sensor_fill_laser_led_subdevid_by_name(
 				struct msm_sensor_ctrl_t *s_ctrl)
 {
+#if SUB_MODULE_LASER_LED >= SUB_MODULE_MAX
+	/* Not part of the Android 6 HAL's sensor_info array. */
+	return 0;
+#else
 	int32_t rc = 0;
 	struct device_node *src_node = NULL;
 	uint32_t val = 0;
@@ -335,6 +339,7 @@ static int32_t msm_sensor_fill_laser_led_subdevid_by_name(
 	}
 
 	return rc;
+#endif
 }
 
 static int32_t msm_sensor_fill_flash_subdevid_by_name(

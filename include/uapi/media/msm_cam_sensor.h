@@ -88,9 +88,16 @@ enum sensor_sub_module_t {
 	SUB_MODULE_CSIPHY_3D,
 	SUB_MODULE_OIS,
 	SUB_MODULE_EXT,
+	SUB_MODULE_MAX,
+	/*
+	 * The Android 6 camera HAL on this board was built with
+	 * SUB_MODULE_MAX == 12. IR_LED, IR_CUT and LASER_LED are not in
+	 * that ABI. Keeping them before MAX makes every compat ioctl that
+	 * carries msm_sensor_info_t miss (VIDIOC_MSM_SENSOR_INIT_CFG32 is
+	 * 0xc0bc56ca, size 188, in the HAL).
+	 */
 	SUB_MODULE_IR_LED,
 	SUB_MODULE_IR_CUT,
-	SUB_MODULE_MAX,
 	SUB_MODULE_LASER_LED,
 };
 
