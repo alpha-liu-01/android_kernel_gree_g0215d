@@ -850,6 +850,17 @@ config HALL_SWITCH
 	help
 	 If you say yes here, you get support for hall sensor
 
+config RAON_REMOTE_CTRL_SOC
+	tristate "Raon IR blaster"
+	depends on I2C && OF
+	help
+	  Say Y here for the Raon infrared blaster on the Gree G0215D.
+	  It creates /dev/remote_ctrl_dev and forwards reads and writes
+	  to the chip at I2C address 0x50.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called raon_remote_ctrl.
+
 config INPUT_GF816M_KEYS
 	tristate "Goodix GF816M touch keys"
 	depends on SPI && OF

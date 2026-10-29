@@ -772,8 +772,12 @@ static int nqx_clock_select(struct nqx_dev *nqx_dev)
 	int r = 0;
 	nqx_dev->s_clk = clk_get(&nqx_dev->client->dev, "ref_clk");
 
-	if (nqx_dev->s_clk == NULL)
+	if (IS_ERR_OR_NULL(nqx_dev->s_clk)) {
+		dev_err(&nqx_dev->client->dev, "ref_clk: %ld\n",
+			PTR_ERR(nqx_dev->s_clk));
+		nqx_dev->s_clk = NULL;
 		goto err_clk;
+	}
 
 	if (nqx_dev->clk_run == false)
 		r = clk_prepare_enable(nqx_dev->s_clk);
@@ -1069,7 +1073,18 @@ static int nqx_probe(struct i2c_client *client,
 	 * present before attempting further hardware initialisation.
 	 *
 	 */
+	/*
+	 * PN547 on this board takes its clock from BBCLK2. The NCI probe
+	 * below talks to the chip before userspace has issued NFC_SET_PWR,
+	 * which is the only other place the clock is enabled.
+	 */
+	r = nqx_clock_select(nqx_dev);
+	if (r < 0)
+		dev_err(&client->dev, "%s: clock before hw check failed\n",
+			__func__);
+
 	r = nfcc_hw_check(client, nqx_dev);
+	nqx_clock_deselect(nqx_dev);
 	if (r) {
 		/* make sure NFCC is not enabled */
 		gpio_set_value(platform_data->en_gpio, 0);

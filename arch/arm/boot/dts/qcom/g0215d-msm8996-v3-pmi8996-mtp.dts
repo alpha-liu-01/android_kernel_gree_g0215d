@@ -199,6 +199,33 @@
 	/* Stock pmx_motor_active: GPIO 74 high enables the DRV2605.
 	 * GPIO 48 is the trigger input and stays pulled down.
 	 */
+	/* Stock raon_remote pins: enable 50, init 126, reset 148. */
+	g0215d_raon_default: g0215d_raon_default {
+		mux {
+			pins = "gpio50", "gpio126", "gpio148";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio50", "gpio126", "gpio148";
+			drive-strength = <8>;
+			bias-pull-up;
+		};
+	};
+
+	g0215d_raon_sleep: g0215d_raon_sleep {
+		mux {
+			pins = "gpio50", "gpio126", "gpio148";
+			function = "gpio";
+		};
+
+		config {
+			pins = "gpio50", "gpio126", "gpio148";
+			drive-strength = <2>;
+			bias-pull-down;
+		};
+	};
+
 	g0215d_motor_default: g0215d_motor_default {
 		mux {
 			pins = "gpio74", "gpio48";
@@ -448,6 +475,16 @@
 /* Stock i2c@757a000 (BLSP1 QUP6) also carries the TFA9890 speaker amp.
  * The driver matches the "tfa98xx" I2C id, so the stock compatible works.
  */
+/* Stock Si4705 analog rail enable. The MTP node on i2c_7 already
+ * describes reset/int/status and the two regulators; it does not
+ * request this GPIO.
+ */
+&i2c_7 {
+	silabs4705@11 {
+		silabs,ldoen-gpio = <&tlmm 14 0>;
+	};
+};
+
 &i2c_6 {
 	tfa98xx@34 {
 		compatible = "nxp,tfa98xx";
@@ -461,12 +498,37 @@
  * is qcom,haptics-drv2605. Enable is TLMM GPIO 74, active high.
  */
 &i2c_8 {
+	/*
+	 * The Raon blaster clock-stretches on a full remote code. DMA mode
+	 * reports OVER_UNDER_RUN and the code never reaches the chip.
+	 * Block mode waits the stretch out. The vibrator writes are short
+	 * and stay in the FIFO.
+	 */
+	qcom,disable-dma;
+
+	raon_remote_ctrl@50 {
+		compatible = "raon,remote-ctrl";
+		reg = <0x50>;
+		remote-ctrl,en-gpio = <&tlmm 50 0>;
+		remote-ctrl,init-gpio = <&tlmm 126 0>;
+		remote-ctrl,reset-gpio = <&tlmm 148 0>;
+		pinctrl-names = "raon_remote_default", "raon_remote_sleeps";
+		pinctrl-0 = <&g0215d_raon_default>;
+		pinctrl-1 = <&g0215d_raon_sleep>;
+	};
+
 	haptics@5a {
 		compatible = "qcom,haptics-drv2605";
 		reg = <0x5a>;
 		motor,en-gpio = <&tlmm 74 0>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&g0215d_motor_default>;
+	};
+
+	/* Stock PN547 eSE power is PM8994 GPIO 12. The MTP node already
+	 * has ven 12, irq 9, firm GPIO 7 and BBCLK2. */
+	nq@28 {
+		qcom,nq-esepwr = <&pm8994_gpios 12 0x00>;
 	};
 };
 

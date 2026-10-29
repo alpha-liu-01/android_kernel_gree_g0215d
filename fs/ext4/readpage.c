@@ -64,7 +64,14 @@ static void completion_pages(struct work_struct *work)
 	bio_for_each_segment_all(bv, bio, i) {
 		struct page *page = bv->bv_page;
 
-		if (ext4_is_ice_enabled()) {
+		struct inode *inode = page->mapping->host;
+
+		/*
+		 * ICE is compiled in, but a normal v1 policy uses software
+		 * AES-256-XTS. Skipping the decrypt for every encrypted file
+		 * returns ciphertext to userspace.
+		 */
+		if (ext4_using_hardware_encryption(inode)) {
 			SetPageUptodate(page);
 		} else {
 			int ret = ext4_decrypt(page);

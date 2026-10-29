@@ -55,6 +55,7 @@ struct silabs_fm_device {
 	int reset_gpio;
 	int int_gpio;
 	int status_gpio;
+	int ldoen_gpio;
 	struct pinctrl *fm_pinctrl;
 	struct pinctrl_state *gpio_state_active;
 	struct pinctrl_state *gpio_state_suspend;
@@ -245,6 +246,20 @@ static int fm_configure_gpios(struct silabs_fm_device *radio, bool on)
 
 	if (on) {
 		/*
+		 * Stock Gree gates the Si4705 rail with TLMM GPIO 14.
+		 * Bring it up before reset so the first I2C command is ACKed.
+		 */
+		if (radio->ldoen_gpio >= 0) {
+			rc = gpio_direction_output(radio->ldoen_gpio, 1);
+			if (rc) {
+				FMDERR("unable to enable ldoen gpio %d (%d)\n",
+					radio->ldoen_gpio, rc);
+				return rc;
+			}
+			msleep(20);
+		}
+
+		/*
 		 * Turn ON sequence
 		 * GPO1/status gpio configuration.
 		 * Keep the GPO1 to high till device comes out of reset.
@@ -331,6 +346,8 @@ static int fm_configure_gpios(struct silabs_fm_device *radio, bool on)
 				FMDERR("Unable to set dir for status gpio\n");
 			msleep(100);
 		}
+		if (radio->ldoen_gpio >= 0)
+			gpio_direction_output(radio->ldoen_gpio, 0);
 	}
 	return rc;
 }
@@ -3575,6 +3592,19 @@ static int silabs_parse_dt(struct device *dev,
 			FMDERR("unable to request status gpio %d (%d)\n",
 							radio->status_gpio, rc);
 			goto err_status_gpio;
+		}
+	}
+
+	radio->ldoen_gpio = of_get_named_gpio(np, "silabs,ldoen-gpio", 0);
+	if (radio->ldoen_gpio < 0) {
+		radio->ldoen_gpio = -1;
+	} else {
+		rc = gpio_request(radio->ldoen_gpio, "silabs_fm_ldoen");
+		if (rc) {
+			FMDERR("unable to request ldoen gpio %d (%d)\n",
+							radio->ldoen_gpio, rc);
+			radio->ldoen_gpio = -1;
+			rc = 0;
 		}
 	}
 	return rc;
